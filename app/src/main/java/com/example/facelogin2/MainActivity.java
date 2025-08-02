@@ -260,7 +260,7 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
                         userInfoPanel.postDelayed(() -> userInfoPanel.setVisibility(View.GONE), 3000);
 
                         try {
-                            String finalUrl = "http://gmo021.cansportsvg.com/hr/hrm/?hash=" +
+                            String finalUrl = "https://gmo021.cansportsvg.com/hr/hrm/?hash=" +
                                     URLEncoder.encode(hashed, "UTF-8");
                             Log.d("OpenURL", "Opening browser with URL: " + finalUrl);
                             Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(finalUrl));
