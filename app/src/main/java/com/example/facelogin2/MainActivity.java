@@ -157,38 +157,56 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
         }
     };
     private void buildEndpointRowsIfNeeded() {
-        if (endpointStatusContainer.getChildCount() == endpoints.length) return;
+        if (endpointStatusContainer.getChildCount() > 0) return;
 
-        endpointStatusContainer.removeAllViews();
+        for (int i = 0; i < endpoints.length; i++) {
+            Endpoint ep = endpoints[i];
 
-        for (Endpoint ep : endpoints) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setPadding(0, dp(2), 0, dp(2));
-            row.setGravity(android.view.Gravity.END | android.view.Gravity.CENTER_VERTICAL);
-
-            View dot = new View(this);
-            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(10), dp(10));
-            dotLp.setMarginEnd(dp(6));
-            dot.setLayoutParams(dotLp);
-            dot.setBackground(ContextCompat.getDrawable(this, R.drawable.dot_red)); // default
+            // mỗi item: [Label][space][dot]
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.HORIZONTAL);
+            item.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            item.setPadding(0, dp(2), 0, dp(2));
 
             TextView label = new TextView(this);
             label.setText(ep.label);
             label.setTextColor(0xFFFFFFFF);
             label.setTextSize(12);
 
-            row.addView(label);
-            row.addView(space(dp(6)));
-            row.addView(dot);
+            View spacer = space(6);
 
-            // gắn tag để tra nhanh khi cập nhật
-            row.setTag(ep.label + "_row");
+            View dot = new View(this);
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(10), dp(10));
+            dot.setLayoutParams(dotLp);
+            dot.setBackground(ContextCompat.getDrawable(this, R.drawable.dot_red)); // default
+
+            item.addView(label);
+            item.addView(spacer);
+            item.addView(dot);
+
+            // tag để update nhanh dot
+            item.setTag(ep.label + "_row");
             dot.setTag(ep.label + "_dot");
 
-            endpointStatusContainer.addView(row);
+            endpointStatusContainer.addView(item);
+
+            // chèn gạch dọc giữa các item (trừ item cuối)
+            if (i < endpoints.length - 1) {
+                endpointStatusContainer.addView(makeDivider());
+            }
         }
     }
+
+    private View makeDivider() {
+        View v = new View(this);
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(dp(1), LinearLayout.LayoutParams.MATCH_PARENT);
+        lp.setMargins(dp(8), 0, dp(8), 0);   // << spacing hai bên gạch
+        v.setLayoutParams(lp);
+        v.setBackgroundColor(0x66FFFFFF);    // trắng mờ
+        return v;
+    }
+
     private void updateSsidUI() {
         String ssid = getCurrentSsid();
         tvSsidValue.setText(ssid != null ? ssid : "—");
@@ -321,9 +339,9 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
 
     // Khai báo các endpoint bạn muốn giám sát
     private final Endpoint[] endpoints = new Endpoint[] {
-            new Endpoint("API Primary", "http://10.13.34.166:5001/recognize-anti-spoofing"),
-            new Endpoint("API Fallback", "http://10.1.16.23:8001/api/x/fr/env/face_search"),
-            new Endpoint("HR URL", "https://gmo021.cansportsvg.com/hr/hrm/")
+            new Endpoint("GMO040", "http://10.13.34.166:5001/recognize-anti-spoofing"),
+            new Endpoint("PAPAGO", "http://10.1.16.23:8001/api/x/fr/env/face_search"),
+            new Endpoint("GMO021", "https://gmo021.cansportsvg.com/hr/hrm/")
     };
     private void uploadImageToApi(File file) {
         runOnUiThread(() -> {
@@ -355,7 +373,7 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
                         .build();
 
                 Request requestPrimary = new Request.Builder()
-                        .url("http://10.13.32.50:5001/recognize-anti-spoofing")
+                        .url("http://10.13.34.166:5001/recognize-anti-spoofing")
                         .addHeader("X-API-Key", "vg_login_app")
                         .addHeader("X-Time", currentTime)
                         .post(requestBodyPrimary)

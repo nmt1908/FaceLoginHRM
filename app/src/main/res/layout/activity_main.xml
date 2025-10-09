@@ -5,51 +5,50 @@
     android:layout_height="match_parent">
     <!-- App Title Bar -->
     <!-- Network Status Bar (top-right overlay) -->
+    <!-- Network Status Bar (bottom-right overlay, horizontal) -->
     <LinearLayout
         android:id="@+id/networkStatusBar"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
+        android:orientation="horizontal"
         android:padding="10dp"
-        android:layout_gravity="top|end"
+        android:layout_gravity="bottom|end"
         android:layout_margin="10dp"
         android:background="#66000000"
-        android:elevation="10dp">
+        android:elevation="12dp">
 
-        <!-- SSID row -->
-        <LinearLayout
+        <!-- Wi-Fi: SSID -->
+        <TextView
+            android:id="@+id/tvSsidLabel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="end|center_vertical">
+            android:text="Wi-Fi:"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:layout_marginEnd="6dp" />
 
-            <TextView
-                android:id="@+id/tvSsidLabel"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Wi-Fi:"
-                android:textColor="#FFFFFF"
-                android:textSize="12sp"
-                android:layout_marginEnd="6dp" />
+        <TextView
+            android:id="@+id/tvSsidValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="..."
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:textSize="12sp" />
 
-            <TextView
-                android:id="@+id/tvSsidValue"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="..."
-                android:textColor="#FFFFFF"
-                android:textStyle="bold"
-                android:textSize="12sp" />
-        </LinearLayout>
+        <!-- spacing -->
+        <View
+            android:layout_width="12dp"
+            android:layout_height="1dp" />
 
-        <!-- Endpoints row -->
+        <!-- Endpoints container: now horizontal -->
         <LinearLayout
             android:id="@+id/endpointStatusContainer"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="6dp"/>
+            android:orientation="horizontal"/>
     </LinearLayout>
+
 
     <LinearLayout
         android:id="@+id/titleBar"
