@@ -4,6 +4,53 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
     <!-- App Title Bar -->
+    <!-- Network Status Bar (top-right overlay) -->
+    <LinearLayout
+        android:id="@+id/networkStatusBar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="10dp"
+        android:background="#66000000"
+        android:elevation="10dp">
+
+        <!-- SSID row -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="end|center_vertical">
+
+            <TextView
+                android:id="@+id/tvSsidLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Wi-Fi:"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:layout_marginEnd="6dp" />
+
+            <TextView
+                android:id="@+id/tvSsidValue"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="..."
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- Endpoints row -->
+        <LinearLayout
+            android:id="@+id/endpointStatusContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="6dp"/>
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/titleBar"
         android:layout_width="match_parent"

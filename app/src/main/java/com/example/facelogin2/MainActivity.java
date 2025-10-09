@@ -41,6 +41,7 @@ import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
@@ -72,7 +73,11 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
     private ImageCapture imageCapture;
     private Runnable hidePreviewRunnable;
     private ProcessCameraProvider cameraProvider;
+    private TextView tvSsidValue;
+    private LinearLayout endpointStatusContainer;
 
+    private final Handler netHandler = new Handler(Looper.getMainLooper());
+    private final long NET_REFRESH_MS = 5000; // 5 giây
     private boolean isTakingPhoto = false;
     private final OkHttpClient httpClient = new OkHttpClient();
     private long faceStraightStartTime = 0;
@@ -110,6 +115,14 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
         labelSimilarity = findViewById(R.id.labelUserSimilarity);
         similarityTextView = findViewById(R.id.userSimilarity);
         loadingSpinner = findViewById(R.id.loadingSpinner);
+        tvSsidValue = findViewById(R.id.tvSsidValue);
+        endpointStatusContainer = findViewById(R.id.endpointStatusContainer);
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 102);
+        }
+        startNetworkStatusLoop();
 
         graphicOverlay.setCameraFacing(true); // camera trước
 
@@ -128,8 +141,190 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
             });
         };
     }
+    private void startNetworkStatusLoop() {
+        // Lập UI item cho từng endpoint 1 lần
+        buildEndpointRowsIfNeeded();
+
+        // Cập nhật ngay và lặp lại
+        netHandler.post(networkRefreshRunnable);
+    }
+
+    private final Runnable networkRefreshRunnable = new Runnable() {
+        @Override public void run() {
+            updateSsidUI();
+            checkAllEndpoints();
+            netHandler.postDelayed(this, NET_REFRESH_MS);
+        }
+    };
+    private void buildEndpointRowsIfNeeded() {
+        if (endpointStatusContainer.getChildCount() == endpoints.length) return;
+
+        endpointStatusContainer.removeAllViews();
+
+        for (Endpoint ep : endpoints) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(0, dp(2), 0, dp(2));
+            row.setGravity(android.view.Gravity.END | android.view.Gravity.CENTER_VERTICAL);
+
+            View dot = new View(this);
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(10), dp(10));
+            dotLp.setMarginEnd(dp(6));
+            dot.setLayoutParams(dotLp);
+            dot.setBackground(ContextCompat.getDrawable(this, R.drawable.dot_red)); // default
+
+            TextView label = new TextView(this);
+            label.setText(ep.label);
+            label.setTextColor(0xFFFFFFFF);
+            label.setTextSize(12);
+
+            row.addView(label);
+            row.addView(space(dp(6)));
+            row.addView(dot);
+
+            // gắn tag để tra nhanh khi cập nhật
+            row.setTag(ep.label + "_row");
+            dot.setTag(ep.label + "_dot");
+
+            endpointStatusContainer.addView(row);
+        }
+    }
+    private void updateSsidUI() {
+        String ssid = getCurrentSsid();
+        tvSsidValue.setText(ssid != null ? ssid : "—");
+    }
+    private void checkAllEndpoints() {
+        for (Endpoint ep : endpoints) {
+            checkSingleEndpoint(ep, ok -> runOnUiThread(() -> updateEndpointDot(ep.label, ok)));
+        }
+    }
+
+    private void updateEndpointDot(String label, boolean ok) {
+        View dot = null;
+        // tìm dot theo tag
+        for (int i = 0; i < endpointStatusContainer.getChildCount(); i++) {
+            View row = endpointStatusContainer.getChildAt(i);
+            Object tag = row.getTag();
+            if (tag != null && tag.toString().equals(label + "_row")) {
+                // dot là con thứ 2 (label, space, dot), nhưng để chắc chắn, tìm theo tag riêng
+                dot = row.findViewWithTag(label + "_dot");
+                break;
+            }
+        }
+        if (dot != null) {
+            dot.setBackground(ContextCompat.getDrawable(this, ok ? R.drawable.dot_green : R.drawable.dot_red));
+        }
+    }
+    private void checkSingleEndpoint(Endpoint ep, java.util.function.Consumer<Boolean> cb) {
+        new Thread(() -> {
+            boolean ok = false;
+            java.net.Socket socket = null;
+            try {
+                java.net.URI u = java.net.URI.create(ep.url);
+                String host = (u.getHost() != null) ? u.getHost() : u.getAuthority();
+                if (host == null) host = ep.url; // phòng hờ
+                int port = u.getPort();
+                if (port == -1) {
+                    port = "https".equalsIgnoreCase(u.getScheme()) ? 443 : 80;
+                }
+
+                socket = new java.net.Socket();
+                socket.connect(new java.net.InetSocketAddress(host, port), 1200); // timeout connect
+                ok = true; // chỉ cần connect thành công là coi như reachable
+            } catch (Exception ignore) {
+                ok = false;
+            } finally {
+                try { if (socket != null) socket.close(); } catch (Exception ignore) {}
+                final boolean result = ok;
+                runOnUiThread(() -> cb.accept(result));
+            }
+        }).start();
+    }
 
 
+    private String getCurrentSsid() {
+        try {
+            // 1) Thử WifiManager trước (nhiều máy đáng tin hơn)
+            android.net.wifi.WifiManager wm =
+                    (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
+                if (wi != null) {
+                    String ssid = normalizeSsid(wi.getSSID());
+                    // Nếu có SSID hợp lệ -> trả luôn
+                    if (ssid != null && !ssid.equals("<unknown>") && !ssid.equals("0x")) {
+                        return ssid;
+                    }
+                }
+            }
+
+            // 2) Fallback qua ConnectivityManager + NetworkCapabilities
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                android.net.Network active = cm.getActiveNetwork();
+                if (active != null) {
+                    NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+                    if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            Object ti = caps.getTransportInfo();
+                            if (ti instanceof android.net.wifi.WifiInfo) {
+                                String ssid = normalizeSsid(((android.net.wifi.WifiInfo) ti).getSSID());
+                                if (ssid != null) return ssid;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3) Nếu đến đây vẫn không có, kiểm tra quyền & trạng thái Location
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
+                return "<permission required>";
+            }
+            if (!isLocationEnabled()) {
+                return "<location off>";
+            }
+        } catch (SecurityException se) {
+            return "<permission required>";
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return "—";
+    }
+
+    private String normalizeSsid(String raw) {
+        if (raw == null) return null;
+        if (raw.equals("<unknown ssid>")) return "<unknown>";
+        // Xóa dấu ngoặc kép nếu có
+        if (raw.startsWith("\"") && raw.endsWith("\"") && raw.length() >= 2) {
+            return raw.substring(1, raw.length() - 1);
+        }
+        return raw;
+    }
+
+    private View space(int widthDp) {
+        View v = new View(this);
+        v.setLayoutParams(new LinearLayout.LayoutParams(dp(widthDp), dp(1)));
+        return v;
+    }
+
+    private int dp(int v) {
+        float d = getResources().getDisplayMetrics().density;
+        return Math.round(v * d);
+    }
+
+    private static class Endpoint {
+        final String label;
+        final String url;
+        Endpoint(String label, String url) { this.label = label; this.url = url; }
+    }
+
+    // Khai báo các endpoint bạn muốn giám sát
+    private final Endpoint[] endpoints = new Endpoint[] {
+            new Endpoint("API Primary", "http://10.13.34.166:5001/recognize-anti-spoofing"),
+            new Endpoint("API Fallback", "http://10.1.16.23:8001/api/x/fr/env/face_search"),
+            new Endpoint("HR URL", "https://gmo021.cansportsvg.com/hr/hrm/")
+    };
     private void uploadImageToApi(File file) {
         runOnUiThread(() -> {
             loadingContainer.setVisibility(View.VISIBLE);
@@ -481,12 +676,27 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
             return bitmap;
         }
     }
+    private boolean isLocationEnabled() {
+        android.location.LocationManager lm =
+                (android.location.LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (lm == null) return false;
+        try {
+            return lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+                    || lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+        } catch (Exception e) {
+            return false;
+        }
+    }
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
                                            @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == 101 && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             startCamera();
+        }
+        if (requestCode == 102) {
+            // Quyền location cho SSID
+            updateSsidUI();
         }
     }
     public boolean isInternetAvailable() {
@@ -506,4 +716,10 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
         }
         return false;
     }
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        netHandler.removeCallbacksAndMessages(null);
+    }
+
 }
