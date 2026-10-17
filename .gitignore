@@ -13,3 +13,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+certificate/
+*.apk
+note.txt
+lock_apps.sh
+unlock_apps.sh

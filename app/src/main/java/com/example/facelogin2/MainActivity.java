@@ -14,13 +14,19 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.os.Build;
-import android.util.Base64;
+import android.os.Environment;
 import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import android.graphics.Matrix;
 import android.media.ExifInterface;
 import androidx.annotation.NonNull;
@@ -50,7 +56,14 @@ import java.net.URL;
 import okhttp3.*;
 
 import com.example.facelogin2.User;
+import com.example.facelogin2.ui.ComposeBridge;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.facemesh.FaceMesh;
+import com.google.mlkit.vision.facemesh.FaceMeshDetection;
+import com.google.mlkit.vision.facemesh.FaceMeshDetector;
+import com.google.mlkit.vision.facemesh.FaceMeshDetectorOptions;
+import com.google.mlkit.vision.facemesh.FaceMeshPoint;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -82,41 +95,92 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
     private final OkHttpClient httpClient = new OkHttpClient();
     private long faceStraightStartTime = 0;
     private static final long STRAIGHT_FACE_DURATION = 1000;
-    TextView alertTextView, labelName, nameTextView, labelCardId, cardIDTextView, labelSimilarity, similarityTextView;
-    ProgressBar loadingSpinner;
-    private LinearLayout loadingContainer,userInfoPanel;
+    // UI States (từ VG-CAMERA)
+    private static final int STATE_IDLE = 0;
+    private static final int STATE_DETECTING = 1;
+    private static final int STATE_PROCESSING = 2;
+    private static final int STATE_COUNTDOWN = 3;
+    private static final int STATE_SUCCESS = 4;
+    private static final int STATE_ERROR = 5;
+    private int currentUIState = STATE_IDLE;
+
+    private androidx.compose.ui.platform.ComposeView composeUserInfo;
+    private User activeUserForCompose = null;
+    private boolean isUserInfoVisible = false;
+
+    private FaceMeshDetector staticDetector;
+    private long countdownStartTime = 0;
+
+    private android.graphics.Rect lastFaceRect = null;
+    private float[] lastMeshPoints = null;
+    private int lastImageWidth = 0;
+    private int lastImageHeight = 0;
+    private int lastImageRotation = 0;
+    private Bitmap frozenBitmap = null;
 
     private Handler idleHandler = new Handler(Looper.getMainLooper());
-
 
     private long IDLE_DELAY_MS;
     private boolean isCountingDownToIdle = false;
     private boolean isPreviewVisible = true;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        staticDetector = FaceMeshDetection.getClient(
+                new FaceMeshDetectorOptions.Builder().build()
+        );
+
         if (!isInternetAvailable()) {
             Toast.makeText(this, "No Internet Connection", Toast.LENGTH_LONG).show();
-
         }
         IDLE_DELAY_MS = getSharedPreferences("settings", MODE_PRIVATE).getInt("time_waiting", 1000);
         Log.e("IDLE_DELAY_MS", String.valueOf(IDLE_DELAY_MS));
-        loadingContainer = findViewById(R.id.loadingContainer);
-        userInfoPanel = findViewById(R.id.userInfoPanel);
+
         previewView = findViewById(R.id.previewView);
         graphicOverlay = findViewById(R.id.graphicOverlay);
-        alertTextView = findViewById(R.id.labelAlert);
-        labelName = findViewById(R.id.labelUserName);
-        nameTextView = findViewById(R.id.userName);
-        labelCardId = findViewById(R.id.labelUserCardId);
-        cardIDTextView = findViewById(R.id.userCardId);
-        labelSimilarity = findViewById(R.id.labelUserSimilarity);
-        similarityTextView = findViewById(R.id.userSimilarity);
-        loadingSpinner = findViewById(R.id.loadingSpinner);
         tvSsidValue = findViewById(R.id.tvSsidValue);
         endpointStatusContainer = findViewById(R.id.endpointStatusContainer);
+
+        composeUserInfo = findViewById(R.id.composeUserInfo);
+        updateComposeUI();
+
+        // Safe View Area handling for Android 15/16 and devices with System Bars / Taskbars
+        View mainRoot = findViewById(R.id.mainRoot);
+        if (mainRoot != null) {
+            ViewCompat.setOnApplyWindowInsetsListener(mainRoot, (v, windowInsets) -> {
+                Insets insets = windowInsets.getInsets(
+                        WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+                );
+
+                // Safe Area: Bù lề trên cho titleBar (tránh đè Status Bar / Camera Notch)
+                LinearLayout titleBar = findViewById(R.id.titleBar);
+                if (titleBar != null) {
+                    titleBar.setPadding(
+                            titleBar.getPaddingLeft(),
+                            insets.top + dp(12),
+                            titleBar.getPaddingRight(),
+                            dp(12)
+                    );
+                }
+
+                // Safe Area: Bù lề dưới và phải cho networkStatusBar (nổi an toàn trên Navigation Bar / Taskbar)
+                View netBar = findViewById(R.id.networkStatusBar);
+                if (netBar != null && netBar.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) netBar.getLayoutParams();
+                    lp.bottomMargin = insets.bottom + dp(10);
+                    lp.rightMargin = insets.right + dp(10);
+                    netBar.setLayoutParams(lp);
+                }
+
+                return windowInsets;
+            });
+        }
+        // Kiosk Immersive Mode (tương tự như VG-FaceDetection)
+        applyImmersiveMode();
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this,
@@ -140,6 +204,40 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
                 // stopCamera();
             });
         };
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyImmersiveMode();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) applyImmersiveMode();
+    }
+
+    // ===== Immersive Fullscreen (tương tự như VG-FaceDetection) =====
+    private void applyImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            final WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            final View decor = getWindow().getDecorView();
+            decor.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+            );
+        }
     }
     private void startNetworkStatusLoop() {
         // Lập UI item cho từng endpoint 1 lần
@@ -343,198 +441,63 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
             new Endpoint("PAPAGO", "http://10.1.16.23:8001/api/x/fr/env/face_search"),
             new Endpoint("GMO021", "https://gmo021.cansportsvg.com/hr/hrm/")
     };
-    private void uploadImageToApi(File file) {
-        runOnUiThread(() -> {
-            loadingContainer.setVisibility(View.VISIBLE);
-            loadingSpinner.setVisibility(View.VISIBLE);
-        });
 
-        new Thread(() -> {
-            try {
-                byte[] fileBytes;
-                try (InputStream is = new FileInputStream(file)) {
-                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                    int nRead;
-                    byte[] data = new byte[16384];
-                    while ((nRead = is.read(data, 0, data.length)) != -1) {
-                        buffer.write(data, 0, nRead);
-                    }
-                    fileBytes = buffer.toByteArray();
-                }
-
-                String currentTime = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-                        .format(new Date());
-
-                // API chính: port 5001
-                RequestBody requestBodyPrimary = new MultipartBody.Builder()
-                        .setType(MultipartBody.FORM)
-                        .addFormDataPart("image_file", file.getName(),
-                                RequestBody.create(fileBytes, MediaType.parse("image/jpeg")))
-                        .build();
-
-                Request requestPrimary = new Request.Builder()
-                        .url("http://10.13.34.166:5001/recognize-anti-spoofing")
-                        .addHeader("X-API-Key", "vg_login_app")
-                        .addHeader("X-Time", currentTime)
-                        .post(requestBodyPrimary)
-                        .build();
-
-                OkHttpClient clientWithTimeout = httpClient.newBuilder()
-                        .callTimeout(5, TimeUnit.SECONDS)
-                        .build();
-
-                Response response;
-                String responseBody;
-                String apiUsed;
-
-                try {
-                    Log.d("API_CALL", "Calling PRIMARY API: port 5001");
-                    response = clientWithTimeout.newCall(requestPrimary).execute();
-                    responseBody = response.body().string();
-                    Log.e("Response-Primary", responseBody);
-                    apiUsed = "Primary";
-                } catch (Exception ex) {
-                    Log.e("PrimaryAPI", "Primary API failed, fallback to secondary: " + ex.getMessage());
-
-                    // Fallback: API phụ port 8001
-                    RequestBody requestBodyFallback = new MultipartBody.Builder()
-                            .setType(MultipartBody.FORM)
-                            .addFormDataPart("env_token", "8d59d8d588f84fc0a24291b8c36b6206")
-                            .addFormDataPart("image_file", file.getName(),
-                                    RequestBody.create(file, MediaType.parse("image/jpeg")))
-                            .build();
-
-                    Request requestFallback = new Request.Builder()
-                            .url("http://10.1.16.23:8001/api/x/fr/env/face_search")
-                            .post(requestBodyFallback)
-                            .build();
-
-                    Log.d("API_CALL", "Calling FALLBACK API: port 8001");
-                    response = httpClient.newCall(requestFallback).execute();
-                    responseBody = response.body().string();
-                    Log.e("Response-Fallback", responseBody);
-                    apiUsed = "Fallback";
-                }
-
-                runOnUiThread(() -> {
-                    loadingSpinner.setVisibility(View.GONE);
-                    loadingContainer.setVisibility(View.GONE);
-                });
-
-                if (!response.isSuccessful()) {
-                    if (response.code() == 400) {
-                        handleRecognitionFail();
-                    } else {
-                        showToastOnMainThread("API error: " + response.code());
-                    }
-                    return;
-                }
-
-                JSONObject jsonObject = new JSONObject(responseBody);
-
-                if (jsonObject.optBoolean("is_fake", false)) {
-                    Log.w("AntiSpoofing", "Detected fake face (from " + apiUsed + " API)");
-                    handleRecognitionFail();
-                    return;
-                }
-
-                if (jsonObject.optInt("is_recognized", 0) == 1) {
-                    String name = jsonObject.optString("name");
-                    String cardId = jsonObject.optString("id_string");
-                    double similarityVal = jsonObject.optDouble("similarity", 0) * 100;
-
-                    if (similarityVal <= 55) {
-                        Log.w("Recognition", "Low similarity (" + similarityVal + "%) from " + apiUsed + " API");
-                        handleRecognitionFail();
-                        return;
-                    }
-
-                    String similarity = String.format("%.2f%%", similarityVal);
-                    User activeUser = new User(name, cardId, similarity);
-
-                    SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault());
-                    String now = sdf.format(new Date());
-                    String combined = cardId + " " + now;
-                    String hashed = CryptoHelper.encrypt(combined);
-
-                    runOnUiThread(() -> {
-                        alertTextView.setText("Facial recognition successful");
-
-                        labelName.setText("Name:");
-                        nameTextView.setText(activeUser.getName());
-
-                        labelCardId.setText("Card ID:");
-                        cardIDTextView.setText(activeUser.getCardId());
-
-                        labelSimilarity.setText("Similarity:");
-                        similarityTextView.setText(activeUser.getSimilarity());
-
-                        userInfoPanel.setVisibility(View.VISIBLE);
-                        userInfoPanel.postDelayed(() -> userInfoPanel.setVisibility(View.GONE), 3000);
-
-                        try {
-                            String finalUrl = "https://gmo021.cansportsvg.com/hr/hrm/?hash=" +
-                                    URLEncoder.encode(hashed, "UTF-8");
-                            Log.d("OpenURL", "Opening browser with URL: " + finalUrl);
-                            Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(finalUrl));
-                            browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            startActivity(browserIntent);
-                        } catch (UnsupportedEncodingException e) {
-                            Log.e("URL Encode", "Encoding failed: " + e.getMessage());
-                            showToastOnMainThread("Failed to open browser");
-                        }
-                    });
-
-                } else {
-                    Log.w("Recognition", "Face not recognized (" + apiUsed + " API)");
-                    runOnUiThread(() -> alertTextView.setText("Face not recognized"));
-                    handleRecognitionFail();
-                }
-
-            } catch (Exception e) {
-                e.printStackTrace();
-                showToastOnMainThread("Error: " + e.getMessage());
-                Log.e("FaceAPI_Error", e.getMessage(), e);
-            } finally {
-                runOnUiThread(() -> {
-                    startCamera();
-                    isTakingPhoto = false;
-                });
-            }
-        }).start();
+    private void updateComposeUI() {
+        if (composeUserInfo == null) return;
+        ComposeBridge.setMainOverlayContent(
+                composeUserInfo,
+                activeUserForCompose,
+                isUserInfoVisible,
+                currentUIState,
+                frozenBitmap,
+                lastFaceRect,
+                lastMeshPoints,
+                lastImageWidth,
+                lastImageHeight,
+                lastImageRotation
+        );
     }
 
+    private void showModernUserInfo(User user) {
+        runOnUiThread(() -> {
+            activeUserForCompose = user;
+            isUserInfoVisible = true;
+            updateComposeUI();
+        });
+    }
+
+    private void hideModernUserInfo() {
+        runOnUiThread(() -> {
+            isUserInfoVisible = false;
+            currentUIState = STATE_IDLE;
+            frozenBitmap = null;
+            updateComposeUI();
+        });
+    }
 
     private void handleRecognitionFail() {
         runOnUiThread(() -> {
-            // Hiện panel chứa thông báo
-            userInfoPanel.setVisibility(View.VISIBLE);
+            currentUIState = STATE_ERROR;
+            User failUser = new User("Recognition Failed", "------", "0%");
+            activeUserForCompose = failUser;
+            isUserInfoVisible = true;
+            frozenBitmap = previewView.getBitmap();
+            updateComposeUI();
 
-            // Hiện alertTextView và set text báo lỗi
-            alertTextView.setVisibility(View.VISIBLE);
-            alertTextView.setText("Facial recognition failed");
-
-            // Ẩn các thông tin user
-            labelName.setVisibility(View.GONE);
-            nameTextView.setVisibility(View.GONE);
-            labelCardId.setVisibility(View.GONE);
-            cardIDTextView.setVisibility(View.GONE);
-            labelSimilarity.setVisibility(View.GONE);
-            similarityTextView.setVisibility(View.GONE);
-
-            // Ẩn loading spinner nếu còn hiện
-            loadingContainer.setVisibility(View.GONE);
-
-            // Tự ẩn sau 2 giây
-            alertTextView.postDelayed(() -> alertTextView.setText(""), 2000);
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                hideModernUserInfo();
+                currentUIState = STATE_IDLE;
+                isTakingPhoto = false;
+                updateComposeUI();
+                startCamera();
+            }, 2500);
         });
     }
-
-
 
     private void showToastOnMainThread(String message) {
         runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show());
     }
+
     private void startCamera() {
         isTakingPhoto = false;
         faceStraightStartTime = 0;
@@ -551,12 +514,12 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
 
-                imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this), new FaceAnalyzer(this,graphicOverlay, this));
+                imageAnalysis.setAnalyzer(
+                        ContextCompat.getMainExecutor(this),
+                        new FaceAnalyzer(this, graphicOverlay, this)
+                );
 
-                // Set rotation đúng chiều của màn hình hiển thị
                 int rotation = getWindowManager().getDefaultDisplay().getRotation();
-
-
                 imageCapture = new ImageCapture.Builder()
                         .setTargetRotation(rotation)
                         .build();
@@ -574,66 +537,264 @@ public class MainActivity extends AppCompatActivity implements FaceAnalyzer.Face
 
     private void stopCamera() {
         if (cameraProvider != null) {
-            cameraProvider.unbindAll();
+            try {
+                cameraProvider.unbindAll();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
         isTakingPhoto = false;
         faceStraightStartTime = 0;
     }
 
     @Override
-    public void onFaceLookingStraight() {
+    public void onFaceMeshDetected(FaceMesh mesh, int width, int height, int rotation, boolean isLookingStraight) {
+        if (currentUIState == STATE_PROCESSING || currentUIState == STATE_SUCCESS) return;
+
         runOnUiThread(() -> {
-            if (faceStraightStartTime == 0) {
-                faceStraightStartTime = System.currentTimeMillis();
-            } else {
-                long elapsed = System.currentTimeMillis() - faceStraightStartTime;
-                if (elapsed >= 0 && !isTakingPhoto) {
-                    isTakingPhoto = true;
-                    takePhoto();
+            lastFaceRect = mesh.getBoundingBox();
+            java.util.List<FaceMeshPoint> points = mesh.getAllPoints();
+            lastMeshPoints = new float[points.size() * 2];
+            for (int i = 0; i < points.size(); i++) {
+                lastMeshPoints[i * 2] = points.get(i).getPosition().getX();
+                lastMeshPoints[i * 2 + 1] = points.get(i).getPosition().getY();
+            }
+
+            lastImageWidth = width;
+            lastImageHeight = height;
+            lastImageRotation = rotation;
+
+            if (currentUIState == STATE_COUNTDOWN) {
+                if (!isLookingStraight) {
+                    currentUIState = STATE_DETECTING;
+                    countdownStartTime = 0;
+                } else {
+                    long elapsed = System.currentTimeMillis() - countdownStartTime;
+                    if (elapsed >= 1500) {
+                        lockAndProcess();
+                    }
                 }
+            } else if (currentUIState != STATE_PROCESSING && currentUIState != STATE_SUCCESS) {
+                currentUIState = STATE_DETECTING;
+            }
+
+            if (currentUIState != STATE_PROCESSING && currentUIState != STATE_SUCCESS) {
+                updateComposeUI();
             }
         });
     }
 
     @Override
-    public void onFaceNotLookingStraight() {
+    public void onNoFaceDetected() {
+        if (currentUIState == STATE_PROCESSING || currentUIState == STATE_SUCCESS) return;
         runOnUiThread(() -> {
-            faceStraightStartTime = 0; // reset nếu mặt không nhìn thẳng hoặc không đủ gần
+            if (currentUIState != STATE_IDLE) {
+                currentUIState = STATE_IDLE;
+                countdownStartTime = 0;
+                lastFaceRect = null;
+                lastMeshPoints = null;
+                updateComposeUI();
+            }
         });
     }
 
-    private void takePhoto() {
-        if (imageCapture == null) {
-            isTakingPhoto = false;
-            return;
-        }
+    @Override
+    public void onFaceInTarget(FaceMesh mesh, boolean isLookingStraight) {
+        if (isTakingPhoto || currentUIState == STATE_PROCESSING || currentUIState == STATE_SUCCESS) return;
+        runOnUiThread(() -> {
+            if (isLookingStraight && currentUIState != STATE_COUNTDOWN) {
+                currentUIState = STATE_COUNTDOWN;
+                countdownStartTime = System.currentTimeMillis();
+                updateComposeUI();
+            }
+        });
+    }
 
-        String filename = "IMG_" + System.currentTimeMillis() + ".jpg";
-        File dir = getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES);
-        if (dir == null) {
-            isTakingPhoto = false;
-            return;
-        }
-        File file = new File(dir, filename);
+    @Override
+    public void onFaceNotInTarget() {
+    }
 
-        ImageCapture.OutputFileOptions outputOptions =
-                new ImageCapture.OutputFileOptions.Builder(file).build();
+    @Override
+    public void onAverageLuminance(double luminance) {
+    }
 
-        imageCapture.takePicture(outputOptions, ContextCompat.getMainExecutor(this),
-                new ImageCapture.OnImageSavedCallback() {
-                    @Override
-                    public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
+    private void lockAndProcess() {
+        if (currentUIState == STATE_PROCESSING) return;
 
-//                         Gửi ảnh lên API, không hiển thị dialog
-                        uploadImageToApi(file);
+        runOnUiThread(() -> {
+            frozenBitmap = previewView.getBitmap();
+            if (frozenBitmap == null) return;
+
+            currentUIState = STATE_PROCESSING;
+            countdownStartTime = 0;
+            updateComposeUI();
+
+            // Haptic Feedback
+            try {
+                android.os.Vibrator vibrator = (android.os.Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                if (vibrator != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.vibrate(android.os.VibrationEffect.createOneShot(60, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
+                    } else {
+                        vibrator.vibrate(60);
                     }
+                }
+            } catch (Exception ignored) {}
 
-                    @Override
-                    public void onError(@NonNull ImageCaptureException exception) {
-                        exception.printStackTrace();
-                        isTakingPhoto = false;
+            InputImage inputImage = InputImage.fromBitmap(frozenBitmap, 0);
+
+            staticDetector.process(inputImage)
+                    .addOnSuccessListener(meshes -> {
+                        if (!meshes.isEmpty()) {
+                            FaceMesh mesh = meshes.get(0);
+                            java.util.List<FaceMeshPoint> points = mesh.getAllPoints();
+                            lastMeshPoints = new float[points.size() * 2];
+                            for (int i = 0; i < points.size(); i++) {
+                                lastMeshPoints[i * 2] = points.get(i).getPosition().getX();
+                                lastMeshPoints[i * 2 + 1] = points.get(i).getPosition().getY();
+                            }
+
+                            lastFaceRect = mesh.getBoundingBox();
+                            lastImageWidth = frozenBitmap.getWidth();
+                            lastImageHeight = frozenBitmap.getHeight();
+                            lastImageRotation = 0;
+
+                            updateComposeUI();
+                        }
+                        uploadBitmapToApi(frozenBitmap);
+                    })
+                    .addOnFailureListener(e -> uploadBitmapToApi(frozenBitmap));
+        });
+    }
+
+    private void uploadBitmapToApi(Bitmap bitmap) {
+        if (bitmap == null) return;
+        new Thread(() -> {
+            try {
+                File dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES);
+                File file = new File(dir, "frozen_capture_" + System.currentTimeMillis() + ".jpg");
+                java.io.FileOutputStream out = new java.io.FileOutputStream(file);
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out);
+                out.flush();
+                out.close();
+                uploadImageFile(file);
+            } catch (Exception e) {
+                Log.e("Upload", "Failed to save frozen bitmap", e);
+            }
+        }).start();
+    }
+
+    private void uploadImageFile(File file) {
+        new Thread(() -> {
+            Response response = null;
+            String responseBody = "";
+            boolean isFallback = false;
+
+            try {
+                byte[] fileBytes;
+                try (FileInputStream fis = new FileInputStream(file)) {
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    byte[] buf = new byte[16384];
+                    int r;
+                    while ((r = fis.read(buf)) != -1) bos.write(buf, 0, r);
+                    fileBytes = bos.toByteArray();
+                }
+
+                String currentTime = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date());
+
+                // 1. API chính (Port 5001)
+                RequestBody bodyPrimary = new MultipartBody.Builder()
+                        .setType(MultipartBody.FORM)
+                        .addFormDataPart("image_file", file.getName(),
+                                RequestBody.create(fileBytes, MediaType.parse("image/jpeg")))
+                        .build();
+
+                Request reqPrimary = new Request.Builder()
+                        .url("http://10.13.34.166:5001/recognize-anti-spoofing")
+                        .addHeader("X-API-Key", "vg_login_app")
+                        .addHeader("X-Time", currentTime)
+                        .post(bodyPrimary)
+                        .build();
+
+                OkHttpClient clientWithTimeout = httpClient.newBuilder()
+                        .callTimeout(10, TimeUnit.SECONDS)
+                        .build();
+
+                try {
+                    Log.d("TIMECALL", "Calling primary API: http://10.13.34.166:5001/recognize-anti-spoofing");
+                    response = clientWithTimeout.newCall(reqPrimary).execute();
+                    responseBody = response.body() != null ? response.body().string() : "";
+                    Log.d("TIMECALL", "Primary API response: " + responseBody);
+                } catch (Exception ex) {
+                    Log.e("TIMECALL", "Primary API failed: " + ex.getMessage());
+                    isFallback = true;
+
+                    RequestBody bodyFallback = new MultipartBody.Builder()
+                            .setType(MultipartBody.FORM)
+                            .addFormDataPart("env_token", "8d59d8d588f84fc0a24291b8c36b6206")
+                            .addFormDataPart("image_file", file.getName(),
+                                    RequestBody.create(fileBytes, MediaType.parse("image/jpeg")))
+                            .build();
+
+                    Request reqFallback = new Request.Builder()
+                            .url("http://10.1.16.23:8001/api/x/fr/env/face_search")
+                            .post(bodyFallback)
+                            .build();
+
+                    response = clientWithTimeout.newCall(reqFallback).execute();
+                    responseBody = response.body() != null ? response.body().string() : "";
+                    Log.d("TIMECALL", "Fallback API response: " + responseBody);
+                }
+
+                if (response != null && response.isSuccessful()) {
+                    JSONObject json = new JSONObject(responseBody);
+                    if (json.optBoolean("is_fake", false)) {
+                        handleRecognitionFail();
+                        return;
                     }
-                });
+                    if (json.optInt("is_recognized", 0) == 1) {
+                        String name = json.optString("name");
+                        String cardId = json.optString("id_string");
+                        double similarityVal = json.optDouble("similarity", 0) * 100.0;
+                        if (similarityVal > 55.0) {
+                            String similarity = String.format(Locale.getDefault(), "%.2f%%", similarityVal);
+                            User activeUser = new User(name, cardId, similarity);
+
+                            SimpleDateFormat sdf = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault());
+                            String now = sdf.format(new Date());
+                            String combined = cardId + " " + now;
+                            String hashed = CryptoHelper.encrypt(combined);
+
+                            runOnUiThread(() -> {
+                                currentUIState = STATE_SUCCESS;
+                                showModernUserInfo(activeUser);
+
+                                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                                    try {
+                                        String finalUrl = "https://gmo021.cansportsvg.com/hr/hrm/?hash=" +
+                                                URLEncoder.encode(hashed, "UTF-8");
+                                        Log.d("OpenURL", "Opening browser with URL: " + finalUrl);
+                                        Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(finalUrl));
+                                        browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                        startActivity(browserIntent);
+                                    } catch (UnsupportedEncodingException e) {
+                                        Log.e("URL Encode", "Encoding failed: " + e.getMessage());
+                                        showToastOnMainThread("Failed to open browser");
+                                    }
+                                    hideModernUserInfo();
+                                    startCamera();
+                                }, 2200);
+                            });
+                            return;
+                        }
+                    }
+                }
+                handleRecognitionFail();
+            } catch (Exception e) {
+                Log.e("API", "Upload error: " + e.getMessage());
+                handleRecognitionFail();
+            }
+        }).start();
     }
 
 
